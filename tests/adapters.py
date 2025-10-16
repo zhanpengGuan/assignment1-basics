@@ -54,6 +54,74 @@ def run_embedding(
     raise NotImplementedError
 
 
+def train_bpe(text: str, vocab_size: int = 10000):
+    """
+    简单的 BPE 训练函数，返回词表和合并记录。
+    Args:
+        text (str): 输入文本
+        vocab_size (int): 目标词表大小
+    Returns:
+        vocab (dict): 词表，token->id
+        merges (dict): 合并记录，pair->merge_step
+    """
+    import re, regex
+    from collections import defaultdict, Counter
+    PAT = r"'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"
+    PAT = regex.compile(PAT)
+    special_tokens = {"<|endoftext|>": 0, "<|unk|>": 1}
+    def get_word_freqs(text):
+        words = PAT.findall(text)
+        return Counter(words)
+    def get_splits(word):
+        return list(word) + ['</w>']
+    def get_stats(word_freqs, splits):
+        pairs = defaultdict(int)
+        for word, freq in word_freqs.items():
+            symbols = splits[word]
+            for i in range(len(symbols) - 1):
+                pairs[(symbols[i], symbols[i + 1])] += freq
+        return pairs
+    def merge_vocab(pair, vocab):
+        new_vocab = {}
+        for word, word_list in vocab.items():
+            i = 0
+            new_word_list = []
+            while i < len(word_list):
+                if i < len(word_list) - 1 and word_list[i] == pair[0] and word_list[i + 1] == pair[1]:
+                    new_word_list.append(''.join(pair))
+                    i += 2
+                else:
+                    new_word_list.append(word_list[i])
+                    i += 1
+            new_vocab[word] = new_word_list
+        return new_vocab
+    word_freqs = get_word_freqs(text)
+    splits = {word: get_splits(word) for word in word_freqs.keys()}
+    vocab = set()
+    for word in word_freqs.keys():
+        vocab.update(splits[word])
+    vocab.update(special_tokens.keys())
+    num_merges = vocab_size - len(vocab)
+    merges = {}
+    for i in range(num_merges):
+        pairs = get_stats(word_freqs, splits)
+        if not pairs:
+            break
+        best_pair = max(pairs, key=pairs.get)
+        splits = merge_vocab(best_pair, splits)
+        merges[best_pair] = i
+    vocab_dict = {}
+    idx = 0
+    for token in special_tokens:
+        vocab_dict[token] = idx
+        idx += 1
+    for word in splits:
+        for subword in splits[word]:
+            if subword not in vocab_dict:
+                vocab_dict[subword] = idx
+                idx += 1
+    return vocab_dict, merges
+
 def run_swiglu(
     d_model: int,
     d_ff: int,
@@ -589,4 +657,77 @@ def run_train_bpe(
                 representing that <token1> was merged with <token2>.
                 Merges are ordered by order of creation.
     """
-    raise NotImplementedError
+    import regex
+    from collections import defaultdict, Counter
+    # 读取文本
+    with open(input_path, 'r', encoding='utf-8') as f:
+        text = f.read()
+    # 正则分词
+    PAT = r"'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"
+    PAT = regex.compile(PAT)
+    # 特殊 token
+    special_tokens = {tok: i for i, tok in enumerate(special_tokens)}
+    def get_word_freqs(text):
+        words = PAT.findall(text)
+        return Counter(words)
+    def get_splits(word):
+        return list(word) + [b'</w>']
+    def get_stats(word_freqs, splits):
+        pairs = defaultdict(int)
+        for word, freq in word_freqs.items():
+            symbols = splits[word]
+            for i in range(len(symbols) - 1):
+                pairs[(symbols[i], symbols[i + 1])] += freq
+        return pairs
+    def merge_vocab(pair, vocab):
+        new_vocab = {}
+        for word, word_list in vocab.items():
+            i = 0
+            new_word_list = []
+            while i < len(word_list):
+                if i < len(word_list) - 1 and word_list[i] == pair[0] and word_list[i + 1] == pair[1]:
+                    new_word_list.append(pair[0] + pair[1] if isinstance(pair[0], bytes) else (pair[0]+pair[1]).encode())
+                    i += 2
+                else:
+                    new_word_list.append(word_list[i])
+                    i += 1
+            new_vocab[word] = new_word_list
+        return new_vocab
+    # 统计词频
+    word_freqs = get_word_freqs(text)
+    # 初始分割
+    splits = {word: [w.encode() for w in get_splits(word)] for word in word_freqs.keys()}
+    vocab = set()
+    for word in word_freqs.keys():
+        vocab.update(splits[word])
+    vocab.update([tok.encode() for tok in special_tokens.keys()])
+    num_merges = vocab_size - len(vocab)
+    merges = []
+    for i in range(num_merges):
+        pairs = get_stats(word_freqs, splits)
+        if not pairs:
+            break
+        best_pair = max(pairs, key=pairs.get)
+        splits = merge_vocab(best_pair, splits)
+        merges.append(best_pair)
+    # 构建 id->bytes 词表
+    vocab_dict = {}
+    idx = 0
+    for tok in special_tokens:
+        vocab_dict[idx] = tok.encode()
+        idx += 1
+    for word in splits:
+        for subword in splits[word]:
+            if subword not in vocab_dict.values():
+                vocab_dict[idx] = subword
+                idx += 1
+    # 合并列表转 tuple[bytes, bytes]
+    merges_bytes = []
+    for pair in merges:
+        a, b = pair
+        if not isinstance(a, bytes):
+            a = a.encode()
+        if not isinstance(b, bytes):
+            b = b.encode()
+        merges_bytes.append((a, b))
+    return vocab_dict, merges_bytes
